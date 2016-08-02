@@ -1,0 +1,215 @@
+#!/usr/bin/perl
+use strict;
+use Proc::Daemon;
+use Data::Dumper;
+use MIME::Base64;
+use warnings;
+
+
+############################### OBTIENE INCIDENTES #########################################################
+sub obtiene_incidentes
+{
+        my @argumentos = @_;
+        my %incidentes = %{$argumentos[0]};
+        my $file = $argumentos[1];
+        my $id=$argumentos[2];
+        my $contador;
+        my $UF_Data = openSnortUnified($file) or die "ERROR al abrir archivo";
+        while ( my $record = readSnortUnified2Record() )
+                {
+
+                        if($record->{TYPE} == 7 || $record->{TYPE} == 72)
+                        {
+                                my $paquete;
+                                if(exists($incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}))
+	                                {
+                                        if(exists($incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'eventos'}{$record->{'event_id'}})){next};
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'n_eventos'}++;
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'ultimo'} = $record;
+                                        $paquete = readSnortUnified2Record();
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'ultimo_paquete'} = $paquete;
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'eventos'}{$record->{'event_id'}}=1;
+                                }
+                                else
+                                {
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}={'id_incidente' => ++$id,'n_eventos' => 1,'primero' => $record, 'ultimo' => $record};
+                                        $paquete = readSnortUnified2Record();
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'primero_paquete'} = $paquete;
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'ultimo_paquete'} = $paquete;
+                                        $incidentes{$record->{'sig_id'},$record->{'sip'},$record->{'protocol'}}{'eventos'}{$record->{'event_id'}}=1;
+                                }
+                                        $contador++;
+                        }
+
+                }
+                closeSnortUnified();
+        return (\%incidentes,$id);
+
+
+}
+
+
+############################### PROCESA ARCHIVO #########################################################
+
+sub procesa_archivo{
+	my @argumentos = @_;
+	my $file = $argumentos[0];
+	my $directory_log = $argumentos[1];
+	my $directory = $argumentos[2];
+	my $name_output_file = $argumentos[3];
+	my %incidentes;
+        my $id=0;
+        my @resultado=obtiene_incidentes(\%incidentes,$file,$id);
+        
+        $id=$resultado[1];
+        %incidentes=%{$resultado[0]};
+                        
+        imprime_incidentes(\%incidentes,$directory_log,$directory,$name_output_file);
+
+	
+}
+
+############################### IMPRIME INCIDENTES #########################################################
+
+sub imprime_incidentes
+{
+        my @argumentos = @_;
+        my %incidentes = %{$argumentos[0]};
+        my $directory_log = $argumentos[1];
+        my $directory = $argumentos[2];
+        my $name_output_file = $argumentos[3];
+        
+        open(my $salida, '+>:unix',$directory.'/'.$name_output_file.'_unified2')or die "no se pudo abrir $!";
+        open(my $salida_plano, '+>',$directory.'/'.$name_output_file.'_plano')or die "no se pudo abrir $!";
+
+	print $salida_plano "--------------------------------------------------------------------------------------------------------------------------------------\n";
+        printf $salida_plano " %12s | %17s | %10s | %16s | %16s | %30s | %30s | %50s |\n", "ID_incidente","total_de_eventos","Protocolo","TSPrimero","TSUltimo","Source IP","Destiny IP","Payload";
+	print $salida_plano "--------------------------------------------------------------------------------------------------------------------------------------\n";
+        foreach my $key (keys %incidentes)
+        {
+                        print $salida  pack('NN',$incidentes{$key}{primero}{TYPE},$incidentes{$key}{primero}{SIZE}).$incidentes{$key}{primero}{raw_record};
+                        print $salida  pack('NN',$incidentes{$key}{primero_paquete}{TYPE},$incidentes{$key}{primero_paquete}{SIZE}).$incidentes{$key}{primero_paquete}{raw_record};
+                        print $salida  pack('NN',$incidentes{$key}{ultimo}{TYPE},$incidentes{$key}{ultimo}{SIZE}).$incidentes{$key}{ultimo}{raw_record};
+                        print $salida  pack('NN',$incidentes{$key}{ultimo_paquete}{TYPE},$incidentes{$key}{ultimo_paquete}{SIZE}).$incidentes{$key}{ultimo_paquete}{raw_record};
+
+###impresion de # de incidente y total de enventos
+
+                        printf $salida_plano (" %12s | %17s |",  $incidentes{$key}{id_incidente}, $incidentes{$key}{n_eventos}) ;
+
+###impresion del protocolo
+                       printf $salida_plano (" %10s |",$incidentes{$key}{primero}{protocol}) ;
+
+###impresion de timestamp primero y ultimo
+
+                        my $tsp1 = ($incidentes{$key}{primero_paquete}{pkt_sec});
+                        my $tsp2 = ($incidentes{$key}{ultimo_paquete}{pkt_sec});
+
+                        printf $salida_plano (" %16s | %16s |", $tsp1, $tsp2);
+			
+#impresion del primer y ultimo evento
+#                       my $primero  = $sorted_numbers[0];
+#                       my $ultimo  = $sorted_numbers[$#sorted_numbers];
+#                if ($primero eq $ultimo){
+#                       printf $salida_plano ("%7s-%-6s | ", $primero,$primero);
+#  	            }
+#       	      else{
+#                    	printf $salida_plano ("%7s-%-6s | ", $primero,$ultimo);
+#           	      }
+ 
+###impresion de ips
+		my $sip = $incidentes{$key}{primero}{sip};
+		my $dip = $incidentes{$key}{primero}{dip};
+	
+		#se convierte la ip en formato decimal a un formato legible     
+
+		if ($sip =~ /^[0-9]/ && $dip =~ /^[0-9]/ ){
+
+			my $squad4       = $sip % 256; $sip      = int($sip/256);
+			my $squad3       = $sip % 256; $sip      = int($sip/256);
+			my $squad2       = $sip % 256; $sip      = int($sip/256);
+			my $squad1       = $sip % 256;
+			
+			my $dquad4       = $dip % 256; $dip      = int($dip/256);
+                        my $dquad3       = $dip % 256; $dip      = int($dip/256);
+                        my $dquad2       = $dip % 256; $dip      = int($dip/256);
+                        my $dquad1       = $dip % 256;
+
+		printf $salida_plano (" %30s |", "$squad1.$squad2.$squad3.$squad4");
+		printf $salida_plano (" %30s |", "$dquad1.$dquad2.$dquad3.$dquad4");
+
+		}#fin if ip check
+		else{
+		printf $salida_plano (" %30s |", $sip);
+                printf $salida_plano (" %30s |", $dip);
+
+	
+		}#fin elsif ip check
+
+
+### obtencion del payload
+
+		my $payload = $incidentes{$key}{primero}{raw_record};
+		my $encoded = encode_base64($payload);
+
+		printf $salida_plano (" %50s \n", $encoded) ;
+
+#aqui se imprimen los eventos en la ultima columna
+
+			      #               print Dumper ($incidentes{$key});
+                        my $variable = Dumper ($incidentes{$key}{'eventos'});
+                        $variable =~ s/(VAR1 = {)//g;
+                        $variable =~ s/(' => 1)//g;
+                        $variable =~ s/[\$',;}]//g;
+                        $variable =~ s/\r|\n//g;
+                        $variable =~ s/          /,/g; ## 10 espacios
+                        $variable =~ s/^,//g;
+                        $variable =~ s/ //g;
+                        my @var = split(",",$variable);
+                        my @sorted_numbers = sort { $a <=> $b } @var;
+
+			#print $salida_plano join(   ",", @sorted_numbers),"  \n" ;
+			#printf $salida_plano ("%3s \n", join("  ,", @sorted_numbers) ) ;
+
+
+       }
+        close($salida);
+        close($salida_plano);
+}
+
+############################### OBTIENE ARCHIVOS #########################################################
+
+sub obtener_archivos{
+
+     my @argumentos = @_;
+     my $dir = $argumentos[0];
+     my $directory = $argumentos[1];
+     my $log_dir = getcwd();
+
+
+     opendir(DIR, $dir) or die $!;
+
+     while (my $file = readdir(DIR)) {
+
+       if ($file eq "." || $file eq "..")
+       { }
+       else{
+          my $nuevo= $dir.''.$file;
+          print "\n\tProcesando $file\n";
+
+	##validando que el archivo no sea de texto plano
+		if (-T $nuevo ){
+		print "El archivo $file no es de tipo data, no se pudo procesar \n\n";
+		}else{
+	
+	          procesa_archivo($nuevo,$log_dir,$directory,$file);
+		}
+       	   }
+     }
+     closedir(DIR);
+
+}
+
+
+1;
+
+
